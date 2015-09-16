@@ -44,11 +44,14 @@ class NumpyArrayHandler(BaseHandler):
     """A jsonpickle handler for numpy (de)serialising arrays."""
     def flatten(self, obj, data):
         order = 'F' if obj.flags.fortran else 'C'
-        buf = jsonpickle.util.b64encode(obj.tostring(order=order))
+        dtype = str(obj.dtype)
+        if dtype != "object":
+            buf = jsonpickle.util.b64encode(obj.tostring(order=order))
+        else:
+            buf = self.nflatten(obj.tolist())
         #TODO: including other parameters like byteorder, etc?
         #TODO: see numpy.info(obj) and obj.__reduce__() for details.
         shape = self.nflatten(obj.shape)
-        dtype = str(obj.dtype)
         args = [shape, dtype, buf, order]
         data['__reduce__'] = (self.nflatten(np.ndarray), args)
         return data
@@ -58,9 +61,14 @@ class NumpyArrayHandler(BaseHandler):
         cls = self.nrestore(cls)
         shape = self.nrestore(args[0])
         dtype = np.dtype(self.nrestore(args[1]))
-        buf = jsonpickle.util.b64decode(args[2])
         order = args[3]
-        return cls(shape=shape, dtype=dtype, buffer=buf, order=order)
+        if dtype != "object":
+            buf = jsonpickle.util.b64decode(args[2])
+            arr = cls(shape=shape, dtype=dtype, buffer=buf, order=order)
+        else:
+            buf = self.nrestore(args[2])
+            arr = np.asarray(buf, dtype=dtype, order=order)
+        return arr
 
 
 class PandasTimeSeriesHandler(BaseHandler):
