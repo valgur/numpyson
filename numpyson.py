@@ -76,9 +76,9 @@ class PandasTimeSeriesHandler(BaseHandler):
 
     def flatten(self, obj, data):
         values = self.nflatten(obj.values)
-        index = self.nflatten(obj.index.values)
+        index = self.nflatten(obj.index)
         args = [values, index]
-        data['__reduce__'] = (self.nflatten(pd.TimeSeries), args)
+        data['__reduce__'] = (self.nflatten(pd.Series), args)
         return data
 
     def restore(self, obj):
@@ -141,7 +141,7 @@ class PandasDataFrameHandler(BaseHandler):
         pickler = self.context
         flatten = pickler.flatten
         values = [flatten(obj[col].values) for col in obj.columns]
-        index = flatten(obj.index.values)
+        index = flatten(obj.index)
         columns = flatten(obj.columns.values)
         args = [values, index, columns]
         data['__reduce__'] = (flatten(pd.DataFrame), args)
@@ -167,7 +167,7 @@ def register_handlers():
     PandasInt64IndexHandler.handles(pd.Int64Index)
     PandasFloat64IndexHandler.handles(pd.Float64Index)
 
-    PandasTimeSeriesHandler.handles(pd.TimeSeries)
+    PandasTimeSeriesHandler.handles(pd.Series)
 
     PandasDataFrameHandler.handles(pd.DataFrame)
 

@@ -1,6 +1,7 @@
 import datetime as dt
 from functools import partial
 import inspect
+from multiprocessing import Process, Queue
 
 import pytest
 import numpy as np
@@ -23,6 +24,31 @@ def test_version():
     assert numpyson.__version__
 
 
+def decode_in_subproc(q, encoded_object):
+    obj = loads(encoded_object)
+    # Multiprocessing is not capable of pickling NumPy arrays so a string representation is returned instead
+    if isinstance(obj, dict):
+        # Dictionary items are not ordered so we need to sort them to get a unique repr
+        output_str = repr(sorted(obj.items()))
+    else:
+        output_str = repr(obj)
+    q.put(output_str)
+
+
+def _test_in_subprocess(object):
+    queue = Queue()
+    encoded = dumps(object)
+    p = Process(target=decode_in_subproc, args=(queue, encoded))
+    p.start()
+    p.join(timeout=3)  # this blocks until the process terminates
+    result = queue.get()
+    if isinstance(object, dict):
+        assert_equal(repr(sorted(object.items())), result)
+    else:
+        assert_equal(repr(object), result)
+    return result
+
+
 @pytest.mark.parametrize('arr_before', [
     np.array([1, 2, 3]),
     np.array([1., 2., 3.]),
@@ -40,36 +66,45 @@ def test_numpy_array_handler(arr_before):
     buf = dumps(arr_before)
     arr_after = loads(buf)
     assert_equal(arr_before, arr_after)
+    _test_in_subprocess(arr_before)
 
 
 def test_nested_array():
     data_before = {"1": np.array([1, 2])}
     buf = dumps(data_before)
-    data_after = loads(buf)
-    assert_equal(data_before["1"], data_after["1"])
+    arr_after = loads(buf)
+    assert_equal(data_before, arr_after)
+    _test_in_subprocess(data_before)
 
 
 
 @pytest.mark.parametrize('ts_before', [
-    pd.TimeSeries([1, 2, 3], index=[0, 1, 2]),
-    pd.TimeSeries([1., 2., 3.], pd.date_range('1970-01-01', periods=3, freq='S')),
-    pd.TimeSeries([1., 2., 3.], pd.date_range('1970-01-01', periods=3, freq='D')),
+    pd.Series([1, 2, 3], index=[0, 1, 2]),
+    pd.Series([1., 2., 3.], pd.date_range('1970-01-01', periods=3, freq='S')),
+    pd.Series([1., 2., 3.], pd.date_range('1970-01-01', periods=3, freq='D')),
+    pd.Series([dt.datetime(1970, 1, 1, 12, 57), dt.datetime(1970, 1, 1, 12, 58)],
+              pd.date_range('1970-01-01', periods=2, freq='D'))
 ])
 def test_pandas_timeseries_handler(ts_before):
     buf = dumps(ts_before)
     ts_after = loads(buf)
     assert_series_equal_strict(ts_before, ts_after)
 
+    _test_in_subprocess(ts_before)
+
 
 @pytest.mark.parametrize('index_before', [
     pd.Index([0, 1, 2]),
     pd.Index([0., 1., 2.]),  # not sure why you would want to index by floating point numbers; here for completeness
     pd.Index(['a', 'b', 'c']),
+    pd.Index([dt.datetime(1970, 1, 1, 12, 57), dt.datetime(1970, 1, 1, 12, 58)])
 ])
 def test_pandas_index_handler(index_before):
     buf = dumps(index_before)
     index_after = loads(buf)
     assert_index_equal(index_before, index_after)
+
+    _test_in_subprocess(index_before)
 
 
 @pytest.mark.parametrize('index_before', [
@@ -81,6 +116,8 @@ def test_pandas_datetime_index_handler(index_before):
     index_after = loads(buf)
     assert_index_equal(index_before, index_after)
 
+    _test_in_subprocess(index_before)
+
 
 @pytest.mark.parametrize('data_before', [
     {"1": pd.date_range('1970-01-01', periods=3, freq='S')},
@@ -90,6 +127,8 @@ def test_datetime_index_nested(data_before):
     buf = dumps(data_before)
     data_after = loads(buf)
     assert_index_equal(data_before["1"], data_after["1"])
+
+    _test_in_subprocess(data_before)
 
 
 TEST_DATA_FRAMES = (
@@ -101,6 +140,7 @@ TEST_DATA_FRAMES = (
     pd.DataFrame({
             'i': [1, 2, 3],
             'f': [1.1, 2.2, 3.3],
+            'd': [dt.datetime(1970, 1, 1, 12, 57), dt.datetime(1970, 1, 1, 12, 58), dt.datetime(1970, 1, 1, 12, 59)],
             's': ['ham', 'spam', 'eggs'],
             'b': [True, False, True],
             'o': [{'a': 1}, {'b': 2}, {'c': 3}],
@@ -115,6 +155,8 @@ def test_pandas_dataframe_handler(df_before):
     buf = dumps(df_before)
     df_after = loads(buf)
     assert_frame_equal_strict(df_before, df_after)
+
+    _test_in_subprocess(df_before)
 
 
 def test_mixed_python_and_pandas_types():
@@ -142,6 +184,7 @@ def test_build_index_handler_for_type():
     with pytest.raises(TypeError):
         build_index_handler_for_type(pd.TimeSeries)
 
+
 @pytest.mark.xfail(reason='failing preserve underlying array state when it is wrapped inside a Pandas object')
 def test_preservation_of_specific_array_ordering():
     df_c = pd.DataFrame(np.array([[1,2],[3,4], [5,6]], order='C'))
@@ -151,12 +194,17 @@ def test_preservation_of_specific_array_ordering():
     assert not df_c.values.flags.fortran
     assert not df_c_after.values.flags.fortran
 
+    _test_in_subprocess(df_c)
+
     df_f = pd.DataFrame(np.array([[1,2],[3,4], [5,6]], order='F'))
     df_f_after = loads(dumps(df_f))
     assert_frame_equal_strict(df_f, df_f_after)
     assert_equal(df_f.values, df_f_after.values)
     assert df_f.values.flags.fortran
     assert df_f_after.values.flags.fortran
+
+    _test_in_subprocess(df_f)
+
 
 def test_preservation_of_specific_array_ordering_simple():
     arr_c = np.array([[1,2],[3,4], [5,6]], order='C')
@@ -173,6 +221,8 @@ def test_preservation_of_specific_array_ordering_simple():
     assert not arr_c_after.flags.fortran
     assert_equal(arr_c, arr_c_after)
 
+    _test_in_subprocess(arr_c)
+
     #   Fortran array order
     arr_f_after = loads(dumps(arr_f))
     assert arr_f.strides == arr_f_after.strides
@@ -180,7 +230,7 @@ def test_preservation_of_specific_array_ordering_simple():
     assert arr_f_after.flags.fortran
     assert_equal(arr_f, arr_f_after)
 
-
+    _test_in_subprocess(arr_f)
 
 
 @pytest.mark.parametrize("val", [np.float64(4.2), np.int64(5)])
@@ -189,6 +239,9 @@ def test_number(val):
     loaded = loads(dumped)
     assert loaded == val
     assert type(loaded) == type(val)
+
+    _test_in_subprocess(val)
+
 
 def test_datetime_identity():
     import datetime
@@ -205,5 +258,7 @@ def test_datetime_identity():
     assert loaded["start"] == val["start"], dumped
     assert loaded["end"] == val["end"]
     assert loaded["end"] == val["end"]
+
+    _test_in_subprocess(val)
 
 
